@@ -24,17 +24,16 @@ function hexToRgb(hex) {
   ];
 }
 
-function deriveDuotone(bgHex) {
-  // The ink IS the background color itself — this is the key insight from
-  // the Flora AI reference. When placed on a teal bg, the teal dots visually
-  // merge with the background, creating a true two-tone screen-print look.
-  // Slightly darkened (0.85x) for just a touch of depth.
+function deriveDuotone(bgHex, inkDarkness) {
+  // inkDarkness: 0 = same as bg, 100 = pure black
+  // Blends between the bg color and black based on the slider
   const [r, g, b] = hexToRgb(bgHex);
+  const factor = 1 - inkDarkness / 100;
   const dark =
     "#" +
     [r, g, b]
       .map((c) =>
-        Math.round(c * 0.85)
+        Math.round(c * factor)
           .toString(16)
           .padStart(2, "0")
       )
@@ -149,7 +148,7 @@ function createOutline(img, strokeWidth, w, h) {
  * - Strong S-curve contrast for dramatic tonal separation
  * - Auto-normalizes brightness range per image for consistent results
  */
-function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
+function createHalftone(img, w, h, dotSpacing, darkColor, lightColor, maxDotPct, contrastGamma) {
   const tmp = document.createElement("canvas");
   tmp.width = w;
   tmp.height = h;
@@ -188,18 +187,13 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   ctx.globalCompositeOperation = "source-atop";
 
   const step = dotSpacing;
-  // maxR just under half-step so dots NEVER fully merge — always slivers
-  // of paper visible, even in the darkest areas. This is the key difference
-  // from real screen-printing: you can always see the dot grid.
-  const maxR = step * 0.46;
+  // maxDotPct controls how large dots can get relative to the grid step.
+  // < 50 = dots never touch. 50 = dots just touch. > 50 = dots overlap/merge.
+  const maxR = step * (maxDotPct / 100);
   const [dr, dg, db] = hexToRgb(darkColor);
 
-  // Moderate sigmoid: gamma=2.5 gives good contrast without crushing everything.
-  // darkness 0.15 → ~0.01 (clean paper)
-  // darkness 0.40 → ~0.22 (visible small dots)
-  // darkness 0.60 → ~0.78 (large dots, paper slivers between)
-  // darkness 0.85 → ~0.99 (nearly max dots, tiny paper gaps)
-  const gamma = 2.5;
+  // Sigmoid S-curve: higher gamma = more contrast (steeper curve)
+  const gamma = contrastGamma;
   function sigmoid(x) {
     if (x <= 0) return 0;
     if (x >= 1) return 1;
@@ -261,6 +255,9 @@ export default function PortraitEffectTool() {
   const [rawUrl, setRawUrl] = useState(null);
   const [strokeWidth, setStrokeWidth] = useState(12);
   const [dotSpacing, setDotSpacing] = useState(4);
+  const [inkDarkness, setInkDarkness] = useState(15);   // 0=bg color, 100=black
+  const [maxDotSize, setMaxDotSize] = useState(46);      // % of step (50=touching)
+  const [contrast, setContrast] = useState(25);           // mapped to gamma 1.0-5.0
   const [previewBg, setPreviewBg] = useState("#1E4D4A");
   const [status, setStatus] = useState("idle");
   const [progressMsg, setProgressMsg] = useState("");
@@ -361,9 +358,11 @@ export default function PortraitEffectTool() {
     const timer = setTimeout(() => {
       const W = img.naturalWidth;
       const H = img.naturalHeight;
-      const dt = deriveDuotone(previewBg);
+      const dt = deriveDuotone(previewBg, inkDarkness);
+      // Map contrast slider (0-100) to gamma (1.0-5.0)
+      const gamma = 1.0 + (contrast / 100) * 4.0;
 
-      const halftone = createHalftone(img, W, H, dotSpacing, dt.dark, dt.light);
+      const halftone = createHalftone(img, W, H, dotSpacing, dt.dark, dt.light, maxDotSize, gamma);
       const outline = createOutline(img, strokeWidth, W, H);
 
       const out = document.createElement("canvas");
@@ -389,7 +388,7 @@ export default function PortraitEffectTool() {
     }, 50);
 
     return () => clearTimeout(timer);
-  }, [imageReady, previewBg, strokeWidth, dotSpacing]);
+  }, [imageReady, previewBg, strokeWidth, dotSpacing, inkDarkness, maxDotSize, contrast]);
 
   /* ── Download ──── */
   function download(format) {
@@ -524,6 +523,42 @@ export default function PortraitEffectTool() {
                 onChange={setDotSpacing}
                 unit="px"
               />
+              <div style={{ height: 8 }} />
+              <RangeControl
+                label="Max dot grootte"
+                value={maxDotSize}
+                min={20}
+                max={75}
+                onChange={setMaxDotSize}
+                unit="%"
+              />
+              <p style={{ fontSize: 10, color: "#aaa", margin: "2px 0 0" }}>
+                {'< 50 = ruimte tussen dots · 50 = raken · > 50 = overlappen'}
+              </p>
+              <div style={{ height: 8 }} />
+              <RangeControl
+                label="Contrast"
+                value={contrast}
+                min={0}
+                max={100}
+                onChange={setContrast}
+                unit=""
+              />
+              <p style={{ fontSize: 10, color: "#aaa", margin: "2px 0 0" }}>
+                Laag = zachte gradatie · Hoog = harde scheiding licht/donker
+              </p>
+              <div style={{ height: 8 }} />
+              <RangeControl
+                label="Inkt donkerheid"
+                value={inkDarkness}
+                min={0}
+                max={80}
+                onChange={setInkDarkness}
+                unit="%"
+              />
+              <p style={{ fontSize: 10, color: "#aaa", margin: "2px 0 0" }}>
+                0% = zelfde als achtergrond · 80% = bijna zwart
+              </p>
               <div style={{ marginBottom: 24 }} />
 
               <SectionLabel>Voorbeeldkleur</SectionLabel>
@@ -733,7 +768,10 @@ export default function PortraitEffectTool() {
                 Outline: <strong>{strokeWidth}px</strong>
               </span>
               <span>
-                Halftone: <strong>{dotSpacing}px</strong>
+                Dots: <strong>{dotSpacing}px</strong> / <strong>{maxDotSize}%</strong>
+              </span>
+              <span>
+                Contrast: <strong>{contrast}</strong> · Inkt: <strong>{inkDarkness}%</strong>
               </span>
               <span style={{ marginLeft: "auto", color: "#999" }}>
                 Transparant bestand
