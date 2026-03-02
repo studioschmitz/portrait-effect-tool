@@ -26,11 +26,12 @@ function hexToRgb(hex) {
 
 function deriveDuotone(bgHex) {
   const [r, g, b] = hexToRgb(bgHex);
+  // Dark ink = deeper shade of the bg color (keeps the hue, not near-black)
   const dark =
     "#" +
     [r, g, b]
       .map((c) =>
-        Math.round(c * 0.15)
+        Math.round(c * 0.45)
           .toString(16)
           .padStart(2, "0")
       )
@@ -88,11 +89,13 @@ function createOutline(img, strokeWidth, w, h) {
 }
 
 /**
- * Raw halftone — large visible dots, high contrast, screen-print look.
- * - Dot SIZE varies with brightness (dark = big dot, light = small)
- * - Contrast-boosted sampling for a punchier, raw feel
- * - Light duotone color fills space between dots
- * - Constrained to subject silhouette
+ * Duotone halftone — mimics screen-printed look from Flora AI.
+ *
+ * Key principles (from the reference prompt):
+ * - Two tones only: dark ink + off-white paper
+ * - Halftone dots PRESERVE highlight detail (no blown-out whites)
+ * - Smooth tonal transitions via halftone density (no posterize)
+ * - Dark areas → large dense dots, midtones → medium, highlights → tiny dots
  */
 function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   const tmp = document.createElement("canvas");
@@ -107,7 +110,7 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   out.height = h;
   const ctx = out.getContext("2d");
 
-  // Fill subject silhouette with light color
+  // Fill subject silhouette with off-white paper color
   ctx.drawImage(img, 0, 0, w, h);
   ctx.globalCompositeOperation = "source-in";
   ctx.fillStyle = lightColor;
@@ -117,8 +120,9 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   ctx.globalCompositeOperation = "source-atop";
 
   const step = dotSpacing;
-  // Dots can almost touch neighbor cells → raw, dense look
-  const maxR = step * 0.55;
+  const maxR = step * 0.52;
+  // Minimum dot radius — keeps tiny dots in highlights (no flat white blowout)
+  const minR = step * 0.06;
   const [dr, dg, db] = hexToRgb(darkColor);
 
   for (let y = 0; y < h; y += step) {
@@ -146,12 +150,11 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
 
       const avgBright = bright / n;
       const avgAlpha = alpha / n;
+      const darkness = 1 - avgBright;
 
-      // Contrast boost: push midtones toward extremes for rawer look
-      const boosted = Math.pow(1 - avgBright, 0.7);
-      const radius = boosted * maxR;
-
-      if (radius < 0.4) continue;
+      // Linear mapping → smooth tonal transitions (no posterize)
+      // Range: minR (pure highlight) → maxR (pure shadow)
+      const radius = minR + darkness * (maxR - minR);
 
       ctx.beginPath();
       ctx.arc(x + step / 2, y + step / 2, radius, 0, Math.PI * 2);
@@ -168,7 +171,7 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
 export default function PortraitEffectTool() {
   const [rawUrl, setRawUrl] = useState(null);
   const [strokeWidth, setStrokeWidth] = useState(12);
-  const [dotSpacing, setDotSpacing] = useState(14);
+  const [dotSpacing, setDotSpacing] = useState(10);
   const [previewBg, setPreviewBg] = useState("#1E4D4A");
   const [status, setStatus] = useState("idle");
   const [progressMsg, setProgressMsg] = useState("");
