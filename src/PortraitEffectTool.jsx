@@ -88,9 +88,9 @@ function createOutline(img, strokeWidth, w, h) {
 }
 
 /**
- * Classic amplitude-modulated halftone.
- * - ONE dark color for all dots
+ * Raw halftone — large visible dots, high contrast, screen-print look.
  * - Dot SIZE varies with brightness (dark = big dot, light = small)
+ * - Contrast-boosted sampling for a punchier, raw feel
  * - Light duotone color fills space between dots
  * - Constrained to subject silhouette
  */
@@ -117,7 +117,8 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   ctx.globalCompositeOperation = "source-atop";
 
   const step = dotSpacing;
-  const maxR = step * 0.48;
+  // Dots can almost touch neighbor cells → raw, dense look
+  const maxR = step * 0.55;
   const [dr, dg, db] = hexToRgb(darkColor);
 
   for (let y = 0; y < h; y += step) {
@@ -145,9 +146,12 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
 
       const avgBright = bright / n;
       const avgAlpha = alpha / n;
-      const radius = (1 - avgBright) * maxR;
 
-      if (radius < 0.3) continue;
+      // Contrast boost: push midtones toward extremes for rawer look
+      const boosted = Math.pow(1 - avgBright, 0.7);
+      const radius = boosted * maxR;
+
+      if (radius < 0.4) continue;
 
       ctx.beginPath();
       ctx.arc(x + step / 2, y + step / 2, radius, 0, Math.PI * 2);
@@ -164,7 +168,7 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
 export default function PortraitEffectTool() {
   const [rawUrl, setRawUrl] = useState(null);
   const [strokeWidth, setStrokeWidth] = useState(12);
-  const [dotSpacing, setDotSpacing] = useState(8);
+  const [dotSpacing, setDotSpacing] = useState(14);
   const [previewBg, setPreviewBg] = useState("#1E4D4A");
   const [status, setStatus] = useState("idle");
   const [progressMsg, setProgressMsg] = useState("");
@@ -397,8 +401,8 @@ export default function PortraitEffectTool() {
               <RangeControl
                 label="Dot afstand"
                 value={dotSpacing}
-                min={4}
-                max={24}
+                min={6}
+                max={30}
                 onChange={setDotSpacing}
                 unit="px"
               />
