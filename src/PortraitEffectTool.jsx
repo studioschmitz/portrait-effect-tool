@@ -26,19 +26,20 @@ function hexToRgb(hex) {
 
 function deriveDuotone(bgHex) {
   const [r, g, b] = hexToRgb(bgHex);
-  // Dark ink = very deep shade of the bg color
-  // 0.18x creates rich, dark ink that's almost black but keeps the hue.
-  // This matches the Flora AI reference where darks are very deep and saturated.
+  // Dark ink = blend 65% pure black + 35% bg color at 0.3x brightness.
+  // This gives near-black ink that still carries a hint of the hue,
+  // matching the Flora AI look where darks are almost black but tinted.
   const dark =
     "#" +
     [r, g, b]
-      .map((c) =>
-        Math.round(c * 0.18)
-          .toString(16)
-          .padStart(2, "0")
-      )
+      .map((c) => {
+        const tinted = c * 0.3;
+        const blended = Math.round(tinted * 0.35); // 65% black, 35% tinted
+        return blended.toString(16).padStart(2, "0");
+      })
       .join("");
-  return { dark, light: "#F5EDD8" };
+  // Paper color matches the outline color for unified highlights
+  return { dark, light: OUTLINE_COLOR };
 }
 
 /** Check if image has >5% transparent pixels */
@@ -187,9 +188,22 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   ctx.globalCompositeOperation = "source-atop";
 
   const step = dotSpacing;
-  // maxR > half-step so dots FULLY merge in darkest areas → solid ink
-  const maxR = step * 0.62;
+  // maxR at 0.72 × step → dots fully overlap in darkest areas = solid ink
+  const maxR = step * 0.72;
   const [dr, dg, db] = hexToRgb(darkColor);
+
+  // Steep sigmoid S-curve: x^g / (x^g + (1-x)^g)
+  // gamma=3.5 creates very aggressive contrast:
+  //   darkness 0.2 → ~0.02 (nearly no dot = clean paper)
+  //   darkness 0.5 → 0.50
+  //   darkness 0.8 → ~0.98 (nearly solid ink)
+  const gamma = 3.5;
+  function steepCurve(x) {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    const xg = Math.pow(x, gamma);
+    return xg / (xg + Math.pow(1 - x, gamma));
+  }
 
   for (let y = 0; y < h; y += step) {
     for (let x = 0; x < w; x += step) {
@@ -221,18 +235,13 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
       const normalized = Math.max(0, Math.min(1, (avgBright - lo) / range));
       const darkness = 1 - normalized;
 
-      // S-curve for HIGH CONTRAST:
-      // - Highlights (bright skin) → pushed toward 0 = no dots = pure paper
-      // - Shadows (hair, clothing) → pushed toward 1 = large dots = solid ink
-      // - Midtones get dramatic separation
-      const sCurve = darkness < 0.5
-        ? 2 * Math.pow(darkness, 2)                          // compress highlights
-        : 1 - 2 * Math.pow(1 - darkness, 2);                 // expand shadows
+      // Apply steep sigmoid — highlights collapse to paper, darks expand to solid
+      const curved = steepCurve(darkness);
 
-      // Skip very bright areas entirely — pure paper, no dots
-      if (sCurve < 0.03) continue;
+      // Skip very bright areas entirely — pure clean paper
+      if (curved < 0.02) continue;
 
-      const radius = sCurve * maxR;
+      const radius = curved * maxR;
 
       ctx.beginPath();
       ctx.arc(x + step / 2, y + step / 2, radius, 0, Math.PI * 2);
