@@ -26,12 +26,13 @@ function hexToRgb(hex) {
 
 function deriveDuotone(bgHex) {
   const [r, g, b] = hexToRgb(bgHex);
-  // Dark ink = deeper shade of the bg color (keeps the hue, not near-black)
+  // Dark ink = deep, rich shade of the bg color — close to the bg itself
+  // 0.28x keeps hue but makes it dark enough for screen-print contrast
   const dark =
     "#" +
     [r, g, b]
       .map((c) =>
-        Math.round(c * 0.45)
+        Math.round(c * 0.28)
           .toString(16)
           .padStart(2, "0")
       )
@@ -56,46 +57,74 @@ function hasTransparency(img) {
 }
 
 /**
- * Solid outline via offset draws — no blur, no shadow.
- * Draws the silhouette at many offsets, fills with OUTLINE_COLOR,
- * then cuts out the original shape so only the border remains.
+ * CRISP solid outline — no blur, no feathering.
+ *
+ * Step 1: Create a hard alpha mask (threshold alpha to 0 or 255)
+ *         This eliminates the semi-transparent edge pixels from bg removal
+ *         that cause the blurry halo when offset-drawn.
+ * Step 2: Dilate the mask by drawing it at many offsets.
+ * Step 3: Fill dilated area with OUTLINE_COLOR, then cut out original mask.
  */
 function createOutline(img, strokeWidth, w, h) {
+  // --- Step 1: Hard alpha mask ---
+  const mask = document.createElement("canvas");
+  mask.width = w;
+  mask.height = h;
+  const mCtx = mask.getContext("2d");
+  mCtx.drawImage(img, 0, 0, w, h);
+  const mData = mCtx.getImageData(0, 0, w, h);
+  const px = mData.data;
+  for (let i = 3; i < px.length; i += 4) {
+    px[i] = px[i] > 20 ? 255 : 0; // hard threshold
+  }
+  // Make all visible pixels solid white (we only care about the shape)
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i + 3] === 255) {
+      px[i] = px[i + 1] = px[i + 2] = 255;
+    }
+  }
+  mCtx.putImageData(mData, 0, 0);
+
+  // --- Step 2: Dilate via offset draws ---
   const c = document.createElement("canvas");
   c.width = w;
   c.height = h;
   const ctx = c.getContext("2d");
 
-  const steps = 64;
-  for (let i = 0; i < steps; i++) {
-    const a = (i / steps) * Math.PI * 2;
-    ctx.drawImage(
-      img,
-      Math.cos(a) * strokeWidth,
-      Math.sin(a) * strokeWidth,
-      w,
-      h
-    );
+  // Use many concentric rings for smooth edges
+  const rings = Math.max(3, Math.ceil(strokeWidth / 2));
+  for (let ring = 1; ring <= rings; ring++) {
+    const dist = (ring / rings) * strokeWidth;
+    const steps = Math.max(32, Math.ceil(dist * 4)); // more steps for larger offsets
+    for (let i = 0; i < steps; i++) {
+      const a = (i / steps) * Math.PI * 2;
+      ctx.drawImage(mask, Math.cos(a) * dist, Math.sin(a) * dist, w, h);
+    }
   }
 
+  // --- Step 3: Fill with outline color, cut out original ---
   ctx.globalCompositeOperation = "source-in";
   ctx.fillStyle = OUTLINE_COLOR;
   ctx.fillRect(0, 0, w, h);
 
+  // Cut out the original shape (using the hard mask, not the soft original)
   ctx.globalCompositeOperation = "destination-out";
-  ctx.drawImage(img, 0, 0, w, h);
+  ctx.drawImage(mask, 0, 0, w, h);
 
   return c;
 }
 
 /**
- * Duotone halftone — mimics screen-printed look from Flora AI.
+ * Fine duotone halftone — classic screen-print / risograph look.
  *
- * Key principles (from the reference prompt):
+ * Flora AI reference specs:
  * - Two tones only: dark ink + off-white paper
- * - Halftone dots PRESERVE highlight detail (no blown-out whites)
- * - Smooth tonal transitions via halftone density (no posterize)
- * - Dark areas → large dense dots, midtones → medium, highlights → tiny dots
+ * - Halftone dots PRESERVE highlight detail (tiny dots, not flat white)
+ * - Smooth tonal transitions via dot density — NO posterize/threshold
+ * - Dark areas: dots nearly touch/merge. Highlights: tiny pinpoint dots.
+ *
+ * This version uses very fine default spacing (4px) for a photographic
+ * print quality that matches the Flora AI reference images.
  */
 function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   const tmp = document.createElement("canvas");
@@ -120,9 +149,10 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   ctx.globalCompositeOperation = "source-atop";
 
   const step = dotSpacing;
-  const maxR = step * 0.52;
-  // Minimum dot radius — keeps tiny dots in highlights (no flat white blowout)
-  const minR = step * 0.06;
+  // maxR slightly over half-step so dots merge in darkest areas
+  const maxR = step * 0.56;
+  // minR keeps visible pinpoint dots even in brightest highlights
+  const minR = step * 0.08;
   const [dr, dg, db] = hexToRgb(darkColor);
 
   for (let y = 0; y < h; y += step) {
@@ -134,7 +164,7 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
       for (let dy = 0; dy < step && y + dy < h; dy++) {
         for (let dx = 0; dx < step && x + dx < w; dx++) {
           const idx = ((y + dy) * w + (x + dx)) * 4;
-          if (data[idx + 3] > 128) {
+          if (data[idx + 3] > 20) {
             bright +=
               (0.299 * data[idx] +
                 0.587 * data[idx + 1] +
@@ -152,9 +182,12 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
       const avgAlpha = alpha / n;
       const darkness = 1 - avgBright;
 
-      // Linear mapping → smooth tonal transitions (no posterize)
-      // Range: minR (pure highlight) → maxR (pure shadow)
-      const radius = minR + darkness * (maxR - minR);
+      // Slight gamma curve (pow 0.85) to push midtones a bit darker
+      // This gives the "inky" screen-print feel where mid-grays have
+      // visible texture rather than fading out too fast.
+      const curved = Math.pow(darkness, 0.85);
+
+      const radius = minR + curved * (maxR - minR);
 
       ctx.beginPath();
       ctx.arc(x + step / 2, y + step / 2, radius, 0, Math.PI * 2);
@@ -171,7 +204,7 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
 export default function PortraitEffectTool() {
   const [rawUrl, setRawUrl] = useState(null);
   const [strokeWidth, setStrokeWidth] = useState(12);
-  const [dotSpacing, setDotSpacing] = useState(10);
+  const [dotSpacing, setDotSpacing] = useState(4);
   const [previewBg, setPreviewBg] = useState("#1E4D4A");
   const [status, setStatus] = useState("idle");
   const [progressMsg, setProgressMsg] = useState("");
@@ -196,7 +229,16 @@ export default function PortraitEffectTool() {
 
     const tempImg = new Image();
     tempImg.src = url;
-    await new Promise((r) => (tempImg.onload = r));
+    await new Promise((r) => {
+      tempImg.onload = r;
+      tempImg.onerror = r;
+    });
+
+    if (!tempImg.naturalWidth) {
+      setStatus("error");
+      setProgressMsg("Kan afbeelding niet laden. Controleer het bestand.");
+      return;
+    }
 
     let finalUrl = url;
 
@@ -205,12 +247,19 @@ export default function PortraitEffectTool() {
       setProgressMsg("AI model laden...");
 
       try {
-        const blob = await removeBackground(url, {
+        // Pass the File blob directly — more reliable than object URLs
+        // which can cause CORS/fetch issues in some browsers
+        const blob = await removeBackground(file, {
           progress: (key, current, total) => {
-            if (key.includes("download")) {
-              setProgressMsg("AI model downloaden (eenmalig)...");
-            } else if (key === "compute:inference") {
-              const pct = Math.round((current / total) * 100);
+            if (key.includes("download") || key.includes("fetch")) {
+              const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+              setProgressMsg(
+                pct > 0
+                  ? `AI model downloaden... ${pct}%`
+                  : "AI model downloaden (eenmalig)..."
+              );
+            } else if (key.includes("compute") || key.includes("inference")) {
+              const pct = total > 0 ? Math.round((current / total) * 100) : 0;
               setProgressMsg(`Achtergrond verwijderen... ${pct}%`);
             }
           },
@@ -220,7 +269,7 @@ export default function PortraitEffectTool() {
         console.error("Background removal failed:", err);
         setStatus("error");
         setProgressMsg(
-          "Achtergrond verwijderen mislukt. Probeer een andere foto of upload een transparante PNG."
+          `Achtergrond verwijderen mislukt: ${err.message || "onbekende fout"}. Probeer een andere foto of upload een transparante PNG.`
         );
         return;
       }
@@ -230,7 +279,17 @@ export default function PortraitEffectTool() {
 
     const img = new Image();
     img.src = finalUrl;
-    await new Promise((r) => (img.onload = r));
+    await new Promise((r) => {
+      img.onload = r;
+      img.onerror = r;
+    });
+
+    if (!img.naturalWidth) {
+      setStatus("error");
+      setProgressMsg("Kan verwerkt beeld niet laden.");
+      return;
+    }
+
     imgRef.current = img;
     setImageReady(Date.now());
   }
@@ -404,8 +463,8 @@ export default function PortraitEffectTool() {
               <RangeControl
                 label="Dot afstand"
                 value={dotSpacing}
-                min={6}
-                max={30}
+                min={3}
+                max={16}
                 onChange={setDotSpacing}
                 unit="px"
               />
