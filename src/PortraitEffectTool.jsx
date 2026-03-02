@@ -26,13 +26,14 @@ function hexToRgb(hex) {
 
 function deriveDuotone(bgHex) {
   const [r, g, b] = hexToRgb(bgHex);
-  // Dark ink = deep, rich shade of the bg color — close to the bg itself
-  // 0.28x keeps hue but makes it dark enough for screen-print contrast
+  // Dark ink = very deep shade of the bg color
+  // 0.18x creates rich, dark ink that's almost black but keeps the hue.
+  // This matches the Flora AI reference where darks are very deep and saturated.
   const dark =
     "#" +
     [r, g, b]
       .map((c) =>
-        Math.round(c * 0.28)
+        Math.round(c * 0.18)
           .toString(16)
           .padStart(2, "0")
       )
@@ -57,13 +58,13 @@ function hasTransparency(img) {
 }
 
 /**
- * CRISP solid outline — no blur, no feathering.
+ * CRISP solid outline — clean, smooth, even border.
  *
- * Step 1: Create a hard alpha mask (threshold alpha to 0 or 255)
- *         This eliminates the semi-transparent edge pixels from bg removal
- *         that cause the blurry halo when offset-drawn.
- * Step 2: Dilate the mask by drawing it at many offsets.
- * Step 3: Fill dilated area with OUTLINE_COLOR, then cut out original mask.
+ * Step 1: Hard alpha mask with higher threshold (128) to reject noisy
+ *         semi-transparent pixels from bg removal. Then erode by 1px
+ *         to clean up jagged edges before dilating.
+ * Step 2: Dilate the clean mask outward by strokeWidth.
+ * Step 3: Fill dilated area with OUTLINE_COLOR, cut out the original.
  */
 function createOutline(img, strokeWidth, w, h) {
   // --- Step 1: Hard alpha mask ---
@@ -74,13 +75,41 @@ function createOutline(img, strokeWidth, w, h) {
   mCtx.drawImage(img, 0, 0, w, h);
   const mData = mCtx.getImageData(0, 0, w, h);
   const px = mData.data;
+
+  // Higher threshold to reject noisy edge pixels from bg removal
   for (let i = 3; i < px.length; i += 4) {
-    px[i] = px[i] > 20 ? 255 : 0; // hard threshold
+    px[i] = px[i] > 128 ? 255 : 0;
   }
-  // Make all visible pixels solid white (we only care about the shape)
-  for (let i = 0; i < px.length; i += 4) {
-    if (px[i + 3] === 255) {
-      px[i] = px[i + 1] = px[i + 2] = 255;
+
+  // Erode by 1px: a pixel is only kept if ALL 4 neighbors are also solid.
+  // This removes single-pixel noise and smooths jagged edges.
+  const eroded = new Uint8Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const idx = (y * w + x) * 4;
+      if (
+        px[idx + 3] === 255 &&
+        px[((y - 1) * w + x) * 4 + 3] === 255 &&
+        px[((y + 1) * w + x) * 4 + 3] === 255 &&
+        px[(y * w + x - 1) * 4 + 3] === 255 &&
+        px[(y * w + x + 1) * 4 + 3] === 255
+      ) {
+        eroded[y * w + x] = 1;
+      }
+    }
+  }
+
+  // Write eroded mask back
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = (y * w + x) * 4;
+      if (eroded[y * w + x]) {
+        px[idx] = px[idx + 1] = px[idx + 2] = 255;
+        px[idx + 3] = 255;
+      } else {
+        px[idx] = px[idx + 1] = px[idx + 2] = 0;
+        px[idx + 3] = 0;
+      }
     }
   }
   mCtx.putImageData(mData, 0, 0);
@@ -91,15 +120,11 @@ function createOutline(img, strokeWidth, w, h) {
   c.height = h;
   const ctx = c.getContext("2d");
 
-  // Use many concentric rings for smooth edges
-  const rings = Math.max(3, Math.ceil(strokeWidth / 2));
-  for (let ring = 1; ring <= rings; ring++) {
-    const dist = (ring / rings) * strokeWidth;
-    const steps = Math.max(32, Math.ceil(dist * 4)); // more steps for larger offsets
-    for (let i = 0; i < steps; i++) {
-      const a = (i / steps) * Math.PI * 2;
-      ctx.drawImage(mask, Math.cos(a) * dist, Math.sin(a) * dist, w, h);
-    }
+  // Single ring at full strokeWidth with many angular steps
+  const steps = Math.max(64, Math.ceil(strokeWidth * 6));
+  for (let i = 0; i < steps; i++) {
+    const a = (i / steps) * Math.PI * 2;
+    ctx.drawImage(mask, Math.cos(a) * strokeWidth, Math.sin(a) * strokeWidth, w, h);
   }
 
   // --- Step 3: Fill with outline color, cut out original ---
@@ -107,7 +132,7 @@ function createOutline(img, strokeWidth, w, h) {
   ctx.fillStyle = OUTLINE_COLOR;
   ctx.fillRect(0, 0, w, h);
 
-  // Cut out the original shape (using the hard mask, not the soft original)
+  // Cut out the original shape
   ctx.globalCompositeOperation = "destination-out";
   ctx.drawImage(mask, 0, 0, w, h);
 
@@ -115,16 +140,13 @@ function createOutline(img, strokeWidth, w, h) {
 }
 
 /**
- * Fine duotone halftone — classic screen-print / risograph look.
+ * High-contrast duotone halftone — Flora AI screen-print look.
  *
- * Flora AI reference specs:
- * - Two tones only: dark ink + off-white paper
- * - Halftone dots PRESERVE highlight detail (tiny dots, not flat white)
- * - Smooth tonal transitions via dot density — NO posterize/threshold
- * - Dark areas: dots nearly touch/merge. Highlights: tiny pinpoint dots.
- *
- * This version uses very fine default spacing (4px) for a photographic
- * print quality that matches the Flora AI reference images.
+ * Key difference from previous versions:
+ * - HIGHLIGHTS ARE CLEAN: brightest areas = pure paper, NO dots
+ * - DARKS ARE SOLID: darkest areas = nearly solid ink, dots fully merged
+ * - Strong S-curve contrast for dramatic tonal separation
+ * - Auto-normalizes brightness range per image for consistent results
  */
 function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   const tmp = document.createElement("canvas");
@@ -133,6 +155,22 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   const tmpCtx = tmp.getContext("2d");
   tmpCtx.drawImage(img, 0, 0, w, h);
   const data = tmpCtx.getImageData(0, 0, w, h).data;
+
+  // --- Pass 1: Collect all brightness values to normalize ---
+  const brightValues = [];
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] > 20) {
+      brightValues.push(
+        (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) / 255
+      );
+    }
+  }
+
+  // Find 5th and 95th percentile for robust normalization
+  brightValues.sort((a, b) => a - b);
+  const lo = brightValues[Math.floor(brightValues.length * 0.05)] || 0;
+  const hi = brightValues[Math.floor(brightValues.length * 0.95)] || 1;
+  const range = hi - lo || 1;
 
   const out = document.createElement("canvas");
   out.width = w;
@@ -145,14 +183,12 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   ctx.fillStyle = lightColor;
   ctx.fillRect(0, 0, w, h);
 
-  // Draw halftone dots on top, constrained to silhouette
+  // Draw halftone dots, constrained to silhouette
   ctx.globalCompositeOperation = "source-atop";
 
   const step = dotSpacing;
-  // maxR slightly over half-step so dots merge in darkest areas
-  const maxR = step * 0.56;
-  // minR keeps visible pinpoint dots even in brightest highlights
-  const minR = step * 0.08;
+  // maxR > half-step so dots FULLY merge in darkest areas → solid ink
+  const maxR = step * 0.62;
   const [dr, dg, db] = hexToRgb(darkColor);
 
   for (let y = 0; y < h; y += step) {
@@ -180,14 +216,23 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
 
       const avgBright = bright / n;
       const avgAlpha = alpha / n;
-      const darkness = 1 - avgBright;
 
-      // Slight gamma curve (pow 0.85) to push midtones a bit darker
-      // This gives the "inky" screen-print feel where mid-grays have
-      // visible texture rather than fading out too fast.
-      const curved = Math.pow(darkness, 0.85);
+      // Normalize brightness to use the full tonal range
+      const normalized = Math.max(0, Math.min(1, (avgBright - lo) / range));
+      const darkness = 1 - normalized;
 
-      const radius = minR + curved * (maxR - minR);
+      // S-curve for HIGH CONTRAST:
+      // - Highlights (bright skin) → pushed toward 0 = no dots = pure paper
+      // - Shadows (hair, clothing) → pushed toward 1 = large dots = solid ink
+      // - Midtones get dramatic separation
+      const sCurve = darkness < 0.5
+        ? 2 * Math.pow(darkness, 2)                          // compress highlights
+        : 1 - 2 * Math.pow(1 - darkness, 2);                 // expand shadows
+
+      // Skip very bright areas entirely — pure paper, no dots
+      if (sCurve < 0.03) continue;
+
+      const radius = sCurve * maxR;
 
       ctx.beginPath();
       ctx.arc(x + step / 2, y + step / 2, radius, 0, Math.PI * 2);
