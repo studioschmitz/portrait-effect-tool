@@ -25,20 +25,20 @@ function hexToRgb(hex) {
 }
 
 function deriveDuotone(bgHex) {
+  // The ink IS the background color itself — this is the key insight from
+  // the Flora AI reference. When placed on a teal bg, the teal dots visually
+  // merge with the background, creating a true two-tone screen-print look.
+  // Slightly darkened (0.85x) for just a touch of depth.
   const [r, g, b] = hexToRgb(bgHex);
-  // Dark ink = blend 65% pure black + 35% bg color at 0.3x brightness.
-  // This gives near-black ink that still carries a hint of the hue,
-  // matching the Flora AI look where darks are almost black but tinted.
   const dark =
     "#" +
     [r, g, b]
-      .map((c) => {
-        const tinted = c * 0.3;
-        const blended = Math.round(tinted * 0.35); // 65% black, 35% tinted
-        return blended.toString(16).padStart(2, "0");
-      })
+      .map((c) =>
+        Math.round(c * 0.85)
+          .toString(16)
+          .padStart(2, "0")
+      )
       .join("");
-  // Paper color matches the outline color for unified highlights
   return { dark, light: OUTLINE_COLOR };
 }
 
@@ -188,17 +188,19 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
   ctx.globalCompositeOperation = "source-atop";
 
   const step = dotSpacing;
-  // maxR at 0.72 × step → dots fully overlap in darkest areas = solid ink
-  const maxR = step * 0.72;
+  // maxR just under half-step so dots NEVER fully merge — always slivers
+  // of paper visible, even in the darkest areas. This is the key difference
+  // from real screen-printing: you can always see the dot grid.
+  const maxR = step * 0.46;
   const [dr, dg, db] = hexToRgb(darkColor);
 
-  // Steep sigmoid S-curve: x^g / (x^g + (1-x)^g)
-  // gamma=3.5 creates very aggressive contrast:
-  //   darkness 0.2 → ~0.02 (nearly no dot = clean paper)
-  //   darkness 0.5 → 0.50
-  //   darkness 0.8 → ~0.98 (nearly solid ink)
-  const gamma = 3.5;
-  function steepCurve(x) {
+  // Moderate sigmoid: gamma=2.5 gives good contrast without crushing everything.
+  // darkness 0.15 → ~0.01 (clean paper)
+  // darkness 0.40 → ~0.22 (visible small dots)
+  // darkness 0.60 → ~0.78 (large dots, paper slivers between)
+  // darkness 0.85 → ~0.99 (nearly max dots, tiny paper gaps)
+  const gamma = 2.5;
+  function sigmoid(x) {
     if (x <= 0) return 0;
     if (x >= 1) return 1;
     const xg = Math.pow(x, gamma);
@@ -231,14 +233,14 @@ function createHalftone(img, w, h, dotSpacing, darkColor, lightColor) {
       const avgBright = bright / n;
       const avgAlpha = alpha / n;
 
-      // Normalize brightness to use the full tonal range
+      // Normalize brightness to full tonal range
       const normalized = Math.max(0, Math.min(1, (avgBright - lo) / range));
       const darkness = 1 - normalized;
 
-      // Apply steep sigmoid — highlights collapse to paper, darks expand to solid
-      const curved = steepCurve(darkness);
+      // Apply sigmoid — highlights become paper, darks become large dots
+      const curved = sigmoid(darkness);
 
-      // Skip very bright areas entirely — pure clean paper
+      // Skip brightest areas — pure clean paper, no dots
       if (curved < 0.02) continue;
 
       const radius = curved * maxR;
